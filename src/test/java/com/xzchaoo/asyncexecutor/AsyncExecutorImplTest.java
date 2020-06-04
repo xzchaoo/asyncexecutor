@@ -1,19 +1,23 @@
 package com.xzchaoo.asyncexecutor;
 
-import org.junit.Test;
-
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.junit.Test;
+
 /**
  * created at 2020/6/4
+ *
  * @author xzchaoo
  */
 public class AsyncExecutorImplTest {
     @Test
     public void test() throws InterruptedException {
-        AsyncExecutor e = new AsyncExecutorImpl("test", 4, 65536, 65536);
+        AsyncExecutorConfig config = new AsyncExecutorConfig();
+        config.setName("test");
+        config.setMaxConcurrency(4);
+        AsyncExecutor e = new AsyncExecutorImpl(config);
         e.start();
         ExecutorService es = Executors.newFixedThreadPool(4);
         AtomicInteger ai = new AtomicInteger();

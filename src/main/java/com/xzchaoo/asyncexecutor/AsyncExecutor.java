@@ -4,7 +4,10 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 
 /**
- * @author xiangfeng.xzc
+ * Async Executor with ability to limit concurrency.
+ * created at 2020/6/4
+ *
+ * @author xzchaoo
  */
 public interface AsyncExecutor {
     /**
@@ -27,8 +30,8 @@ public interface AsyncExecutor {
     /**
      * Wrap a sync command into async command by running sync command in an executor.
      *
-     * @param executor
-     * @param syncCommand
+     * @param executor    executor
+     * @param syncCommand sync command
      */
     default void publish(Executor executor, Runnable syncCommand) {
         publish(() -> {
@@ -51,5 +54,17 @@ public interface AsyncExecutor {
      */
     void ack();
 
+    /**
+     * Get delayed command count.
+     *
+     * @return
+     */
     int getDelaySize();
+
+    /**
+     * Get working in progress command count.
+     *
+     * @return
+     */
+    int getActiveCount();
 }
