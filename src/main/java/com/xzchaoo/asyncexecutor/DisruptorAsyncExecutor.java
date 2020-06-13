@@ -16,17 +16,18 @@ import com.lmax.disruptor.dsl.ProducerType;
 
 /**
  * created at 2020/6/4
+ *
  * @author xzchaoo
  */
-public class AsyncExecutorImpl implements AsyncExecutor {
-    private static final Logger LOGGER = LoggerFactory.getLogger(AsyncExecutorImpl.class);
+public class DisruptorAsyncExecutor extends AbstractAsyncExecutor {
+    private static final Logger LOGGER = LoggerFactory.getLogger(DisruptorAsyncExecutor.class);
 
     private static final int STATE_NEW     = 0;
     private static final int STATE_STARTED = 1;
     private static final int STATE_STOPPED = 2;
 
-    private static final AtomicIntegerFieldUpdater<AsyncExecutorImpl> STATE_UPDATER =
-            AtomicIntegerFieldUpdater.newUpdater(AsyncExecutorImpl.class, "state");
+    private static final AtomicIntegerFieldUpdater<DisruptorAsyncExecutor> STATE_UPDATER =
+            AtomicIntegerFieldUpdater.newUpdater(DisruptorAsyncExecutor.class, "state");
 
     private static final int ACTION_ADD = 0;
     private static final int ACTION_ACK = 1;
@@ -42,7 +43,7 @@ public class AsyncExecutorImpl implements AsyncExecutor {
 
     private volatile int state = STATE_NEW;
 
-    public AsyncExecutorImpl(AsyncExecutorConfig config) {
+    public DisruptorAsyncExecutor(AsyncExecutorConfig config) {
         if (config.getMaxConcurrency() <= 0) {
             throw new IllegalArgumentException("maxConcurrency must > 0");
         }
@@ -63,45 +64,39 @@ public class AsyncExecutorImpl implements AsyncExecutor {
                 ProducerType.MULTI,
                 new LiteBlockingWaitStrategy());
         disruptor.setDefaultExceptionHandler(new InnerExceptionHandler());
-        disruptor.handleEventsWith((EventHandler<Event>) (event, sequence, endOfBatch) -> onEvent(event)) //
-                // set to null, help gc
-                .then((EventHandler<Event>) (event, sequence, endOfBatch) -> event.clear()); //
+        disruptor.handleEventsWith((EventHandler<Event>) (event, sequence, endOfBatch) -> onEvent(event));
         ringBuffer = disruptor.getRingBuffer();
     }
 
     private void onEvent(Event event) {
-        switch (event.action) {
-            case ACTION_ADD:
-                if (wip < maxConcurrency) {
-                    ++wip;
-                    execute(event.asyncCommand);
-                } else {
-                    if (delayed.size() == delayedCommandBufferSize) {
-                        throw new IllegalStateException("delayedCommandBufferSize is full");
-                    }
-                    delayed.offerLast(event.asyncCommand);
-                }
-                break;
-            case ACTION_ACK:
-                Runnable asyncCommand = delayed.pollFirst();
-                if (asyncCommand != null) {
-                    execute(asyncCommand);
-                } else {
-                    if (wip == 0) {
-                        throw new IllegalStateException("wip is 0");
-                    }
-                    --wip;
-                }
-                break;
-        }
-    }
-
-    private void execute(Runnable asyncCommand) {
         try {
-            asyncCommand.run();
-        } catch (Exception e) {
-            // 按约定 不应该抛异常, 我们只能记录error然后忽略
-            LOGGER.error("uncaught exception", e);
+            switch (event.action) {
+                case ACTION_ADD:
+                    if (wip < maxConcurrency) {
+                        ++wip;
+                        execute(event.asyncCommand);
+                    } else {
+                        if (delayed.size() == delayedCommandBufferSize) {
+                            throw new IllegalStateException("delayedCommandBufferSize is full");
+                        }
+                        delayed.offerLast(event.asyncCommand);
+                    }
+                    break;
+                case ACTION_ACK:
+                    Runnable asyncCommand = delayed.pollFirst();
+                    if (asyncCommand != null) {
+                        execute(asyncCommand);
+                    } else {
+                        if (wip == 0) {
+                            throw new IllegalStateException("wip is 0");
+                        }
+                        --wip;
+                    }
+                    break;
+            }
+        } finally {
+            // for gc
+            event.asyncCommand = null;
         }
     }
 
@@ -151,6 +146,16 @@ public class AsyncExecutorImpl implements AsyncExecutor {
         add0(ACTION_ACK, null, false);
     }
 
+    @Override
+    public Stat stat() {
+        Stat stat = new Stat();
+        stat.activeCount = wip;
+        stat.delayedSize = delayed.size();
+        stat.bufferSize = ringBuffer.getBufferSize();
+        stat.maxConcurrency = maxConcurrency;
+        return stat;
+    }
+
     private void add0(int action, Runnable command, boolean canBlock) {
         long cursor;
         if (blockOnInsufficient && canBlock) {
@@ -166,17 +171,6 @@ public class AsyncExecutorImpl implements AsyncExecutor {
         event.action = action;
         event.asyncCommand = command;
         ringBuffer.publish(cursor);
-    }
-
-    @Override
-    public int getDelaySize() {
-        // TODO 理论上非线程安全 但不影响功能 只是不准而已
-        return delayed.size();
-    }
-
-    @Override
-    public int getActiveCount() {
-        return wip;
     }
 
     private static class Event {

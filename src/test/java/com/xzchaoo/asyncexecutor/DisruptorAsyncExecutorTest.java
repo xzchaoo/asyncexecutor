@@ -11,13 +11,13 @@ import org.junit.Test;
  *
  * @author xzchaoo
  */
-public class AsyncExecutorImplTest {
+public class DisruptorAsyncExecutorTest {
     @Test
     public void test() throws InterruptedException {
         AsyncExecutorConfig config = new AsyncExecutorConfig();
         config.setName("test");
         config.setMaxConcurrency(4);
-        AsyncExecutor e = new AsyncExecutorImpl(config);
+        AsyncExecutor e = new DisruptorAsyncExecutor(config);
         e.start();
         ExecutorService es = Executors.newFixedThreadPool(4);
         AtomicInteger ai = new AtomicInteger();
