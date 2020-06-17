@@ -14,15 +14,15 @@ public class TypeExecutors {
      * @param maxBatch
      * @return
      */
-    public static TypeExecutor lockFree(int commandBufferSize, int taskBufferSize, int maxConcurrency, int maxBatch) {
+    public static TypedExecutor lockFree(int commandBufferSize, int taskBufferSize, int maxConcurrency, int maxBatch) {
         return new LockFreeTypeExecutor(commandBufferSize, taskBufferSize, maxConcurrency, maxBatch);
     }
 
-    public static TypeExecutor liteBlockLockFree(int commandBufferSize, int taskBufferSize, int maxConcurrency, int maxBatch) {
+    public static TypedExecutor liteBlockLockFree(int commandBufferSize, int taskBufferSize, int maxConcurrency, int maxBatch) {
         return new LiteBlockLockFreeTypeExecutor(commandBufferSize, taskBufferSize, maxConcurrency, maxBatch);
     }
 
-    public static TypeExecutor disruptor(int commandBufferSize, int taskBufferSize, int maxConcurrency, int maxBatch) {
+    public static TypedExecutor disruptor(int commandBufferSize, int taskBufferSize, int maxConcurrency, int maxBatch) {
         return new DisruptorRingBufferTypeExecutor(commandBufferSize, taskBufferSize, maxConcurrency, maxBatch);
     }
 }
