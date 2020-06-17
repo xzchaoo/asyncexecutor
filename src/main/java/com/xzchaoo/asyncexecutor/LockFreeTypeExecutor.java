@@ -1,48 +1,70 @@
 package com.xzchaoo.asyncexecutor;
 
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
 import org.jctools.queues.MpscArrayQueue;
 
 /**
+ * 缺点加入command队列就算是成功, 但其实后面可能会因为加不进去队列而失败...
+ *
  * @author xiangfeng.xzc
  * @date 2020-06-11
  */
 public class LockFreeTypeExecutor extends AbstractTypeExecutor {
 
-    private static final AtomicIntegerFieldUpdater<LockFreeTypeExecutor> WIP_UPDATER =
-            AtomicIntegerFieldUpdater.newUpdater(LockFreeTypeExecutor.class, "wip");
-
     // configs
-    private final int maxBatch;
-    private final int maxConcurrency;
     private final int bufferSize;
 
-    // state
-    private          int executingType = 0;
-    private          int executed;
-    private volatile int wip;
-    private volatile int delayedCount;
+    private final LimitProvider limitProvider;
 
-    // TODO 更优雅一些?
-    private final Map<Integer, ArrayDeque<Runnable>> delayed = new HashMap<>();
-    private final List<Integer>                      types   = new ArrayList<>();
-    private final MpscArrayQueue<TaskCommand>        cmdQueue;
+    // state
+    /**
+     * Current executing type.
+     */
+    private int           executingType = 0;
+    private int           maxBatch;
+    private int           maxConcurrency;
+    /**
+     * Current executed task count of currentType.
+     */
+    private int           executed;
+    /**
+     * Current work in progress task count of currentType.
+     */
+    private AtomicInteger wip           = new AtomicInteger();
+    /**
+     * Total delayed task count of all types.
+     */
+    private AtomicInteger delayedCount  = new AtomicInteger();
+    /**
+     * Current executingType's index of types array.
+     */
+    private int           typeIndex     = -1;
+    /**
+     * Indicate that other type has delayed tasks. Current type should give up when 'executed' reach 'maxBatch'.
+     */
+    private boolean       otherTypeHasDelayed;
+
+    private final ConcurrentHashMap<Integer, MpscArrayQueue<Runnable>> delayed = new ConcurrentHashMap<>();
+    private final CopyOnWriteArrayList<Integer>                        types   = new CopyOnWriteArrayList<>();
+    private final MpscArrayQueue<Integer>                              cmdQueue;
 
     private final AtomicInteger drainLoopWip = new AtomicInteger(0);
 
-    public LockFreeTypeExecutor(int commandBufferSize, int bufferSize, int maxConcurrency, int maxBatch) {
-        // 探究底层实现
+    public LockFreeTypeExecutor(int commandBufferSize, int taskMaxDelaySize,
+                                LimitProvider limitProvider) {
+        if (commandBufferSize <= 0) {
+            throw new IllegalArgumentException();
+        }
+        if (taskMaxDelaySize <= 0) {
+            throw new IllegalArgumentException();
+        }
+        this.limitProvider = limitProvider;
+
         this.cmdQueue = new MpscArrayQueue<>(commandBufferSize);
-        this.bufferSize = bufferSize;
-        this.maxConcurrency = maxConcurrency;
-        this.maxBatch = maxBatch;
+        this.bufferSize = taskMaxDelaySize;
     }
 
     @Override
@@ -55,172 +77,171 @@ public class LockFreeTypeExecutor extends AbstractTypeExecutor {
         // nothing todo
     }
 
+    /**
+     * 这里我想了一下, 我们需要确保: 如果任务能放到delayed里就一定能被执行正常(除了stop调用外), 如果放不进去(队列满)就应该立即抛异常
+     *
+     * @param type      type
+     * @param asyncTask asyncTask
+     */
     @Override
-    public boolean tryExecute(int type, Runnable asyncTask) {
-        if (type <= 0) {
-            throw new IllegalArgumentException();
+    protected void execute(int type, Runnable asyncTask) {
+        MpscArrayQueue<Runnable> q = delayed.get(type);
+        if (q == null) {
+            q = new MpscArrayQueue<>(bufferSize);
+            MpscArrayQueue<Runnable> oldQ = delayed.putIfAbsent(type, q);
+            if (oldQ == null) {
+                // TODO 这里原子性问题
+                types.add(type);
+            } else {
+                q = oldQ;
+            }
         }
-        if (asyncTask == null) {
-            throw new IllegalArgumentException();
+        if (!q.offer(asyncTask)) {
+            throw new IllegalStateException("task queue full");
         }
-        TaskCommand cmd = new TaskCommand();
-        cmd.type = type;
-        cmd.task = asyncTask;
-        if (!cmdQueue.offer(cmd)) {
+        delayedCount.incrementAndGet();
+
+        // TODO 理论上这里也可能爆掉... 但可能性比较小, 因为处理比较快, 此时有可能导致Executor进入不一致的状态(还有数据delay, 但却不继续往下走)
+        if (!cmdQueue.offer(type)) {
+            throw new IllegalStateException("cmdQueue is full");
+        }
+
+        drainLoop();
+    }
+
+    @Override
+    protected boolean tryExecute(int type, Runnable safeAsyncTask) {
+        MpscArrayQueue<Runnable> q = delayed.get(type);
+        if (q == null) {
+            q = new MpscArrayQueue<>(bufferSize);
+            MpscArrayQueue<Runnable> oldQ = delayed.putIfAbsent(type, q);
+            if (oldQ == null) {
+                // TODO 这里原子性问题
+                types.add(type);
+            } else {
+                q = oldQ;
+            }
+        }
+        if (!q.offer(safeAsyncTask)) {
             return false;
         }
+        delayedCount.incrementAndGet();
+
+        // TODO 理论上这里也可能爆掉... 但可能性比较小, 因为处理比较快, 此时有可能导致Executor进入不一致的状态(还有数据delay, 但却不继续往下走)
+        if (!cmdQueue.offer(type)) {
+            throw new IllegalStateException("cmdQueue is full");
+        }
+
         drainLoop();
         return true;
     }
 
-    @Override
-    public void execute(int type, Runnable asyncTask) {
-        if (type <= 0) {
-            throw new IllegalArgumentException();
-        }
-        if (asyncTask == null) {
-            throw new IllegalArgumentException();
-        }
-        TaskCommand cmd = new TaskCommand();
-        cmd.type = type;
-        cmd.task = asyncTask;
-        if (!cmdQueue.offer(cmd)) {
-            throw new IllegalStateException("cmdQueue is full");
-        }
-        drainLoop();
-    }
-
     private boolean canExecute() {
-        return wip < maxConcurrency && executed < maxBatch;
+        // <=0 means no limit
+        return (maxConcurrency <= 0 || wip.get() < maxConcurrency)
+                && (maxBatch <= 0 || executed < maxBatch || !otherTypeHasDelayed);
     }
 
     private void drainLoop() {
         if (drainLoopWip.getAndIncrement() != 0) {
             return;
         }
-        int g = drainLoopWip.get();
+        int delta = drainLoopWip.get();
         do {
             for (; ; ) {
-                TaskCommand cmd = cmdQueue.poll();
-                if (cmd == null) {
+                // type0 新增了一个task
+                Integer type0 = cmdQueue.relaxedPoll();
+                if (type0 == null) {
                     // 没有任务了 break
                     break;
                 }
-                // 没有任务正在执行或当前批次可以继续执行
-                if (executingType == 0 || executingType == cmd.type && canExecute()) {
-                    executingType = cmd.type;
-                    // 如果有积压先处理积压的
-                    ArrayDeque<Runnable> q = delayed.get(cmd.type);
-                    if (q != null) {
-                        drainQueue(q);
-                    }
-                    if (q == null || canExecute()) {
-                        ++executed;
-                        WIP_UPDATER.incrementAndGet(this);
-                        // 如果还能执行则立即执行
-                        safeExecute(cmd.task);
-                    } else {
-                        // 否则加入延迟队列
-                        delay(cmd.type, cmd.task);
-                    }
+                int type = type0;
+                MpscArrayQueue<Runnable> q = delayed.get(type0);
+                if (executingType == 0) {
+                    executingType = type;
+                    maxBatch = limitProvider.getMaxBatch(type);
+                    maxConcurrency = limitProvider.getMaxConcurrency(type);
+                    drainQueue(q);
+                } else if (executingType == type) {
+                    drainQueue(q);
                 } else {
-                    delay(cmd.type, cmd.task);
+                    otherTypeHasDelayed = true;
                 }
             }
-            // 其实非强制打到 maxBatch 才释放 可能会过早释放
-            // 将wip放在后面可以让尽量多连续执行
-            if (wip == 0) {
-                switchToOtherType();
+            if (executingType > 0) {
+                MpscArrayQueue<Runnable> q = delayed.get(executingType);
+                if (wip.get() == 0 && (q.isEmpty() || !canExecute())) {
+                    // 当前queue已经空了 或者超过maxBatch限制, 切换到下个queue去执行
+                    switchToOtherType();
+                } else {
+                    // 否则可能还有继续执行的余地
+                    drainQueue(q);
+                }
             }
-            g = drainLoopWip.addAndGet(-g);
-        } while (g != 0);
+            delta = drainLoopWip.addAndGet(-delta);
+        } while (delta != 0);
     }
-
-    private void delay(int type, Runnable task) {
-        ArrayDeque<Runnable> q = delayed.get(type);
-        if (q == null) {
-            types.add(type);
-            q = new ArrayDeque<>(bufferSize);
-            delayed.put(type, q);
-        }
-        if (q.size() == bufferSize) {
-            // TODO exception ? or ?
-            throw new IllegalStateException("delay queue for " + type + " is full");
-        }
-        ++delayedCount;
-        q.add(task);
-
-    }
-
-    private int typeIndex = -1;
 
     private void switchToOtherType() {
         executingType = 0;
-        WIP_UPDATER.lazySet(this, 0);
         executed = 0;
-        if (delayedCount == 0) {
+        otherTypeHasDelayed = false;
+        // 这里也不对 有并发问题...
+        if (delayedCount.get() == 0) {
             return;
         }
         int size = types.size();
         for (int i = 0; i < size; ++i) {
-            typeIndex++;
-            if (typeIndex == size) {
+            if (++typeIndex == size) {
                 typeIndex = 0;
             }
-            Integer type = types.get(typeIndex);
-            ArrayDeque<Runnable> q = delayed.get(type);
+            int type = types.get(typeIndex);
+            MpscArrayQueue<Runnable> q = delayed.get(type);
             if (!q.isEmpty()) {
                 executingType = type;
+                int typeIndex2 = typeIndex;
+                for (int j = i + 1; j < size; ++j) {
+                    if (++typeIndex2 == size) {
+                        typeIndex2 = 0;
+                    }
+                    MpscArrayQueue<Runnable> q2 = delayed.get(types.get(typeIndex2));
+                    if (!q2.isEmpty()) {
+                        otherTypeHasDelayed = true;
+                        break;
+                    }
+                }
+                maxConcurrency = limitProvider.getMaxConcurrency(type);
+                maxBatch = limitProvider.getMaxBatch(type);
                 drainQueue(q);
                 return;
             }
         }
     }
 
-    private void drainQueue(ArrayDeque<Runnable> q) {
+    private void drainQueue(MpscArrayQueue<Runnable> q) {
         for (; canExecute(); ) {
-            Runnable task = q.pollFirst();
+            Runnable task = q.relaxedPoll();
             if (task == null) {
                 break;
             }
-            WIP_UPDATER.incrementAndGet(this);
+            wip.incrementAndGet();
             ++executed;
-            --delayedCount;
+            delayedCount.decrementAndGet();
             safeExecute(task);
         }
     }
 
     @Override
-    public void ack(int type) {
-        // TODO block here?
-        // TODO 这里假设所有ack调用都是合法的, 否则可能会有问题...
-        // 这个 executingType 在错误ack情况下的可见性无法保证
-        if (executingType != type) {
-            throw new IllegalStateException("executingType mismatch");
-        }
-
-        for (; ; ) {
-            int wip = this.wip;
-            if (wip <= 0) {
-                throw new IllegalStateException("wip <= 0");
-            }
-            if (WIP_UPDATER.compareAndSet(this, wip, wip - 1)) {
-                break;
-            }
-        }
-
+    protected void ack(int type) {
+        wip.decrementAndGet();
         drainLoop();
     }
 
     @Override
     public Stat stat() {
         Stat stat = new Stat();
-        stat.setDelayedSize(delayedCount);
+        stat.setDelayedSize(delayedCount.get());
+        stat.setWip(wip.get());
         return stat;
-    }
-
-    private static class TaskCommand {
-        int      type;
-        Runnable task;
     }
 }

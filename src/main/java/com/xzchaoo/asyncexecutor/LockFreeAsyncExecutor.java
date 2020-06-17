@@ -1,8 +1,8 @@
 package com.xzchaoo.asyncexecutor;
 
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
+import org.jctools.queues.MessagePassingQueue;
 import org.jctools.queues.MpscArrayQueue;
 
 /**
@@ -10,33 +10,25 @@ import org.jctools.queues.MpscArrayQueue;
  * @date 2020-06-11
  */
 public class LockFreeAsyncExecutor extends AbstractAsyncExecutor {
-    private static final AtomicIntegerFieldUpdater<LockFreeAsyncExecutor> WIP_UPDATER =
-            AtomicIntegerFieldUpdater.newUpdater(LockFreeAsyncExecutor.class, "wip");
 
-    private final    MpscArrayQueue<Runnable> delayed;
-    private final    int                      bufferSize;
-    private final    int                      maxConcurrency;
-    private volatile int                      wip;
-    private final    AtomicInteger            drainLoopWip = new AtomicInteger();
+    private final MessagePassingQueue<Runnable> delayed;
+    private final int                           maxConcurrency;
+    private final AtomicInteger                 wip          = new AtomicInteger();
+    private final AtomicInteger                 drainLoopWip = new AtomicInteger();
 
     public LockFreeAsyncExecutor(int bufferSize, int maxConcurrency) {
-        this.bufferSize = bufferSize;
+        if (bufferSize <= 0) {
+            throw new IllegalArgumentException("bufferSize <= 0");
+        }
+        if (maxConcurrency <= 0) {
+            throw new IllegalArgumentException("maxConcurrency <= 0");
+        }
         this.maxConcurrency = maxConcurrency;
         this.delayed = new MpscArrayQueue<>(bufferSize);
     }
 
     @Override
-    public void start() {
-        // nothing to do
-    }
-
-    @Override
-    public void stop() {
-        // nothing to do
-    }
-
-    @Override
-    public void publish(Runnable asyncCommand) {
+    protected void execute(Runnable asyncCommand) {
         if (!delayed.offer(asyncCommand)) {
             throw new IllegalStateException("delayed queue is full");
         }
@@ -48,41 +40,33 @@ public class LockFreeAsyncExecutor extends AbstractAsyncExecutor {
         if (drainLoopWip.getAndIncrement() != 0) {
             return;
         }
-        int g = drainLoopWip.get();
+        int delta = drainLoopWip.get();
         do {
-            for (; wip < maxConcurrency; ) {
-                Runnable cmd = delayed.poll();
+            for (; wip.get() < maxConcurrency; ) {
+                Runnable cmd = delayed.relaxedPoll();
                 if (cmd == null) {
                     break;
                 }
-                // 因为+的地方只有这么一个 肯定会成功的 并且不会超过 maxConcurrency
-                WIP_UPDATER.incrementAndGet(this);
-                execute(cmd);
+                // 因为+的地方只有这么一个 并且不会超过 maxConcurrency
+                wip.incrementAndGet();
+                safeExecute(cmd);
             }
-            g = drainLoopWip.addAndGet(-g);
-        } while (g != 0);
+            delta = drainLoopWip.addAndGet(-delta);
+        } while (delta != 0);
     }
 
     @Override
-    public void ack() {
-        for (; ; ) {
-            int wip = this.wip;
-            if (wip <= 0) {
-                throw new IllegalStateException("wip " + wip + " <= 0");
-            }
-            if (WIP_UPDATER.compareAndSet(this, wip, wip - 1)) {
-                break;
-            }
-        }
+    protected void ack() {
+        wip.decrementAndGet();
         drainLoop();
     }
 
     @Override
     public Stat stat() {
         Stat stat = new Stat();
-        stat.activeCount = wip;
+        stat.activeCount = wip.get();
         stat.delayedSize = delayed.size();
-        stat.bufferSize = bufferSize;
+        stat.bufferSize = delayed.capacity();
         stat.maxConcurrency = maxConcurrency;
         return stat;
     }

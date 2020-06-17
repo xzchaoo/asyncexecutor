@@ -9,7 +9,7 @@ import java.util.function.Consumer;
  * @author xiangfeng.xzc
  * @date 2020-06-11
  */
-public interface TypeExecutor {
+public interface TypedExecutor {
     /**
      * Start this instance.
      */
@@ -26,6 +26,10 @@ public interface TypeExecutor {
      */
     void execute(int type, Consumer<Ack> asyncTask);
 
+    boolean tryExecute(int type, Consumer<Ack> asyncTask);
+
+    // void safeExecute(int type, Consumer<Ack> asyncTask, Runnable onQueueFullCallback);
+
     void execute(int type, Executor executor, Runnable syncTask);
 
     Stat stat();
@@ -36,6 +40,35 @@ public interface TypeExecutor {
     @FunctionalInterface
     interface Ack {
         void ack();
+    }
+
+    interface LimitProvider {
+        // void onLimit(int type, Runnable asyncTask);
+
+        /**
+         * Return max concurrency of type, must > 0.
+         *
+         * @param type
+         * @return
+         */
+        int getMaxConcurrency(int type);
+
+        /**
+         * Return max batch of type, value <= 0 means no limit.
+         *
+         * @param type
+         * @return
+         */
+        int getMaxBatch(int type);
+
+        /**
+         * 此时已经无法对应... 任务了... 难道要多附加一个
+         *
+         * @param type
+         * @param asyncTask
+         */
+        // @Deprecated
+        // void onQueueFull(int type, Runnable asyncTask);
     }
 
     class Stat {

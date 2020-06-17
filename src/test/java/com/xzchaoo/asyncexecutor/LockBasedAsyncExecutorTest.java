@@ -16,12 +16,11 @@ public class LockBasedAsyncExecutorTest {
         // AsyncExecutor ae = AsyncExecutors.lockBased(10, 4);
         // TODO 注意 bufferSize必须是2^n
         AsyncExecutor ae = AsyncExecutors.lockFree(65536, 64);
-        ae.start();
         ExecutorService es = Executors.newFixedThreadPool(64);
         AtomicInteger ai = new AtomicInteger();
         // Executors.newFixedThreadPool(8)
         for (int i = 0; i < 6400; i++) {
-            ae.publish(es, () -> {
+            ae.execute(es, () -> {
                 try {
                     Thread.sleep(10);
                     ai.incrementAndGet();

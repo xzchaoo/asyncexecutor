@@ -60,11 +60,6 @@ public class LiteBlockLockFreeTypeExecutor extends AbstractTypeExecutor {
     }
 
     @Override
-    public boolean tryExecute(int type, Runnable asyncTask) {
-        return false;
-    }
-
-    @Override
     public void execute(int type, Runnable asyncTask) {
         if (type <= 0) {
             throw new IllegalArgumentException();
@@ -96,6 +91,11 @@ public class LiteBlockLockFreeTypeExecutor extends AbstractTypeExecutor {
             }
         }
         drainLoop();
+    }
+
+    @Override
+    protected boolean tryExecute(int type, Runnable safeAsyncTask) {
+        throw new UnsupportedOperationException();
     }
 
     private final Lock          lock       = new ReentrantLock();
